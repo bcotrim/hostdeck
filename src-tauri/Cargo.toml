@@ -1,0 +1,16 @@
+[package]
+name = "hostdeck"
+version = "0.1.0"
+description = "macOS hosts file manager"
+authors = ["Bernardo Cotrim"]
+license = "MIT"
+repository = "https://github.com/bcotrim/hostdeck"
+homepage = "https://github.com/bcotrim/hostdeck#readme"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }

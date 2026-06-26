@@ -1,0 +1,32 @@
+{
+  "name": "hostdeck",
+  "version": "0.1.0",
+  "description": "A macOS app for managing /etc/hosts entries.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bcotrim/hostdeck.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bcotrim/hostdeck/issues"
+  },
+  "homepage": "https://github.com/bcotrim/hostdeck#readme",
+  "keywords": [
+    "macos",
+    "hosts-file",
+    "tauri",
+    "dns",
+    "developer-tools"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-web.js",
+    "dev": "python3 -m http.server 5174",
+    "tauri": "tauri dev",
+    "tauri:build": "tauri build",
+    "test": "node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.3"
+  }
+}
