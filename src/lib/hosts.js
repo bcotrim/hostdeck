@@ -2,6 +2,7 @@ export const MANAGED_START = "# BEGIN Hostdeck managed block";
 export const MANAGED_END = "# END Hostdeck managed block";
 
 const HOST_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+const PROTECTED_HOSTS = new Set(["localhost", "broadcasthost"]);
 
 export function isValidIp(value) {
   const ip = String(value || "").trim();
@@ -30,6 +31,11 @@ export function isValidHostname(value) {
   if (!host || host.length > 253 || host.includes("..")) return false;
   if (/[/:#\s]/.test(host)) return false;
   return host.split(".").every((label) => HOST_LABEL_RE.test(label));
+}
+
+export function isProtectedHostname(value) {
+  const host = String(value || "").trim().toLowerCase();
+  return PROTECTED_HOSTS.has(host) || host.endsWith(".localhost");
 }
 
 export function normalizeEntry(entry = {}) {
@@ -71,6 +77,8 @@ export function validateProfiles(profiles) {
         issues.push(issue("error", profile.id, entry.id, "host", `${label} is missing a host name.`));
       } else if (!isValidHostname(entry.host)) {
         issues.push(issue("error", profile.id, entry.id, "host", `${label} has an invalid host name.`));
+      } else if (isProtectedHostname(entry.host)) {
+        issues.push(issue("error", profile.id, entry.id, "host", `${entry.host} is a protected system host.`));
       }
 
       if (isValidHostname(entry.host)) {
@@ -88,7 +96,7 @@ export function validateProfiles(profiles) {
 
 export function renderManagedBlock(profile, options = {}) {
   const updatedAt = options.updatedAt || new Date().toISOString();
-  const entries = profile.entries.filter((entry) => entry.ip && entry.host);
+  const entries = profile.entries.filter((entry) => entry.ip && entry.host && !isProtectedHostname(entry.host));
   const lines = [
     MANAGED_START,
     `# Profile: ${sanitizeComment(profile.name)}`,
@@ -117,11 +125,44 @@ export function applyManagedBlock(hostsText, profile, options = {}) {
   return `${base ? `${base}\n\n` : ""}${block}\n`;
 }
 
+export function buildHostsText(hostsText, profile, options = {}) {
+  const managedHosts = managedHostSet(profile);
+  const base = stripManagedBlock(hostsText)
+    .split(/\r?\n/)
+    .filter((line) => !lineMatchesHosts(line, managedHosts))
+    .join("\n")
+    .trimEnd();
+  const block = renderManagedBlock(profile, options);
+  return `${base ? `${base}\n\n` : ""}${block}\n`;
+}
+
 export function parseHostsText(hostsText = "") {
+  return parseHostsRows(hostsText);
+}
+
+export function parseHostsRows(hostsText = "", options = {}) {
   return String(hostsText)
     .split(/\r?\n/)
-    .map((line, index) => parseHostsLine(line, index + 1))
+    .map((line, index) => parseHostsLine(line, index + 1, options))
     .filter(Boolean);
+}
+
+export function extractManagedBlock(hostsText = "") {
+  const source = String(hostsText);
+  const start = source.indexOf(MANAGED_START);
+  const end = source.indexOf(MANAGED_END);
+  if (start === -1 || end === -1 || end < start) return "";
+  return source.slice(start, end + MANAGED_END.length);
+}
+
+export function findManagedHostConflicts(hostsText, profile) {
+  const managedHosts = managedHostSet(profile);
+  if (managedHosts.size === 0) return [];
+
+  return parseHostsRows(stripManagedBlock(hostsText), { includeDisabled: true })
+    .filter((row) => row.validIp && row.validHost)
+    .map((row) => ({ ...row, matches: rowMatchingHosts(row, managedHosts) }))
+    .filter((row) => row.matches.length);
 }
 
 export function serializeProfile(profile) {
@@ -137,12 +178,15 @@ export function parseProfileJson(source) {
   return normalizeProfile(profile);
 }
 
-function parseHostsLine(line, lineNumber) {
+function parseHostsLine(line, lineNumber, options = {}) {
   const raw = String(line);
   const trimmed = raw.trim();
-  if (!trimmed || trimmed.startsWith("#")) return null;
+  if (!trimmed) return null;
+  if (trimmed.startsWith("#") && !options.includeDisabled) return null;
 
-  const [body, ...commentParts] = raw.split("#");
+  const enabled = !trimmed.startsWith("#");
+  const source = enabled ? raw : trimmed.replace(/^#+\s*/, "");
+  const [body, ...commentParts] = source.split("#");
   const parts = body.trim().split(/\s+/).filter(Boolean);
   if (parts.length < 2) return null;
 
@@ -152,9 +196,28 @@ function parseHostsLine(line, lineNumber) {
     host: parts[1],
     aliases: parts.slice(2),
     comment: commentParts.join("#").trim(),
+    enabled,
     validIp: isValidIp(parts[0]),
     validHost: isValidHostname(parts[1])
   };
+}
+
+function managedHostSet(profile) {
+  return new Set(
+    (profile.entries || [])
+      .map((entry) => String(entry.host || "").trim().toLowerCase())
+      .filter((host) => host && !isProtectedHostname(host))
+  );
+}
+
+function rowMatchingHosts(row, hosts) {
+  return [row.host, ...row.aliases].filter((host) => hosts.has(String(host).toLowerCase()));
+}
+
+function lineMatchesHosts(line, hosts) {
+  if (hosts.size === 0) return false;
+  const row = parseHostsLine(line, 1, { includeDisabled: true });
+  return row?.validIp && row.validHost ? rowMatchingHosts(row, hosts).length > 0 : false;
 }
 
 function issue(level, profileId, entryId, field, message) {

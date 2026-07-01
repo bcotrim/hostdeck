@@ -1,7 +1,8 @@
 use serde::Serialize;
 use std::{
-    fs,
-    os::unix::fs::PermissionsExt,
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -23,13 +24,12 @@ struct PrivilegedResult {
 
 #[tauri::command]
 fn read_hosts() -> Result<HostsState, String> {
-    let contents = fs::read_to_string(HOSTS_PATH).map_err(|error| {
-        format!("Could not read {HOSTS_PATH}: {error}")
-    })?;
+    let contents = fs::read_to_string(HOSTS_PATH)
+        .map_err(|error| format!("Could not read {HOSTS_PATH}: {error}"))?;
     let modified_at = fs::metadata(HOSTS_PATH)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
-        .and_then(system_time_secs);
+        .and_then(system_time_millis);
 
     Ok(HostsState {
         contents,
@@ -39,18 +39,25 @@ fn read_hosts() -> Result<HostsState, String> {
 }
 
 #[tauri::command]
-fn write_hosts(contents: String) -> Result<PrivilegedResult, String> {
+fn write_hosts(
+    contents: String,
+    expected_modified_at: Option<u64>,
+) -> Result<PrivilegedResult, String> {
     if contents.trim().is_empty() {
         return Err("Refusing to write an empty hosts file.".to_string());
     }
 
-    let timestamp = now_secs()?;
-    let temp_path = write_temp_hosts(&contents, timestamp)?;
+    ensure_hosts_unchanged(expected_modified_at)?;
+
+    let timestamp = timestamp_token()?;
+    let temp_path = write_temp_hosts(&contents, &timestamp)?;
     let backup_path = format!("{HOSTS_PATH}.hostdeck.{timestamp}.bak");
+    let backup_exists_message = format!("Backup already exists: {backup_path}");
     let script = format!(
-        "set -e; cp {hosts} {backup}; cp {temp} {hosts}; chown root:wheel {hosts}; chmod 644 {hosts}; dscacheutil -flushcache; killall -HUP mDNSResponder",
+        "set -e; if test -e {backup}; then echo {backup_exists_message} >&2; exit 1; fi; cp {hosts} {backup}; cp {temp} {hosts}; chown root:wheel {hosts}; chmod 644 {hosts}; dscacheutil -flushcache; killall -HUP mDNSResponder",
         hosts = shell_quote(HOSTS_PATH),
         backup = shell_quote(&backup_path),
+        backup_exists_message = shell_quote(&backup_exists_message),
         temp = shell_quote(&temp_path.to_string_lossy()),
     );
 
@@ -61,12 +68,14 @@ fn write_hosts(contents: String) -> Result<PrivilegedResult, String> {
 
 #[tauri::command]
 fn backup_hosts() -> Result<PrivilegedResult, String> {
-    let timestamp = now_secs()?;
+    let timestamp = timestamp_token()?;
     let backup_path = format!("{HOSTS_PATH}.hostdeck.{timestamp}.bak");
+    let backup_exists_message = format!("Backup already exists: {backup_path}");
     let script = format!(
-        "set -e; cp {hosts} {backup}; chown root:wheel {backup}; chmod 644 {backup}",
+        "set -e; if test -e {backup}; then echo {backup_exists_message} >&2; exit 1; fi; cp {hosts} {backup}; chown root:wheel {backup}; chmod 644 {backup}",
         hosts = shell_quote(HOSTS_PATH),
         backup = shell_quote(&backup_path),
+        backup_exists_message = shell_quote(&backup_exists_message),
     );
 
     run_privileged_shell(&script).map(|_| PrivilegedResult { backup_path })
@@ -90,18 +99,51 @@ fn main() {
         .expect("error while running Hostdeck");
 }
 
-fn write_temp_hosts(contents: &str, timestamp: u64) -> Result<PathBuf, String> {
-    let path = std::env::temp_dir().join(format!(
-        "hostdeck-hosts-{}-{timestamp}.tmp",
-        std::process::id()
-    ));
-    fs::write(&path, contents).map_err(|error| {
-        format!("Could not write temporary hosts file: {error}")
-    })?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).map_err(|error| {
-        format!("Could not set temporary hosts file permissions: {error}")
-    })?;
-    Ok(path)
+fn write_temp_hosts(contents: &str, timestamp: &str) -> Result<PathBuf, String> {
+    for attempt in 0..32 {
+        let path = std::env::temp_dir().join(format!(
+            "hostdeck-hosts-{}-{timestamp}-{attempt}.tmp",
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path);
+
+        let mut file = match file {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not write temporary hosts file: {error}")),
+        };
+
+        if let Err(error) = file.write_all(contents.as_bytes()) {
+            let _ = fs::remove_file(&path);
+            return Err(format!("Could not write temporary hosts file: {error}"));
+        }
+
+        return Ok(path);
+    }
+
+    Err("Could not create a unique temporary hosts file.".to_string())
+}
+
+fn ensure_hosts_unchanged(expected_modified_at: Option<u64>) -> Result<(), String> {
+    let Some(expected) = expected_modified_at else {
+        return Ok(());
+    };
+
+    let current = fs::metadata(HOSTS_PATH)
+        .map_err(|error| format!("Could not inspect {HOSTS_PATH}: {error}"))?
+        .modified()
+        .ok()
+        .and_then(system_time_millis);
+
+    if current == Some(expected) {
+        return Ok(());
+    }
+
+    Err("Refusing to overwrite /etc/hosts because it changed since it was loaded. Reload and try again.".to_string())
 }
 
 fn run_privileged_shell(script: &str) -> Result<(), String> {
@@ -141,13 +183,46 @@ fn applescript_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn now_secs() -> Result<u64, String> {
+fn timestamp_token() -> Result<String, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
+        .map(|duration| duration.as_nanos().to_string())
         .map_err(|error| format!("System clock error: {error}"))
 }
 
-fn system_time_secs(value: SystemTime) -> Option<u64> {
-    value.duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs())
+fn system_time_millis(value: SystemTime) -> Option<u64> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quotes_shell_values() {
+        assert_eq!(shell_quote("/tmp/host deck"), "'/tmp/host deck'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn quotes_applescript_values() {
+        assert_eq!(applescript_string("say \"hi\""), "\"say \\\"hi\\\"\"");
+        assert_eq!(applescript_string("a\\b"), "\"a\\\\b\"");
+    }
+
+    #[test]
+    fn creates_unique_temp_hosts_file() {
+        let timestamp = timestamp_token().unwrap();
+        let first = write_temp_hosts("127.0.0.1 localhost\n", &timestamp).unwrap();
+        let second = write_temp_hosts("127.0.0.1 localhost\n", &timestamp).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(fs::read_to_string(&first).unwrap(), "127.0.0.1 localhost\n");
+
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
+    }
 }

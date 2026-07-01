@@ -4,8 +4,13 @@ import {
   MANAGED_END,
   MANAGED_START,
   applyManagedBlock,
+  buildHostsText,
+  extractManagedBlock,
+  findManagedHostConflicts,
+  isProtectedHostname,
   isValidHostname,
   isValidIp,
+  parseHostsRows,
   parseHostsText,
   parseProfileJson,
   serializeProfile,
@@ -37,6 +42,13 @@ test("validates host names", () => {
   assert.equal(isValidHostname("-bad.local"), false);
   assert.equal(isValidHostname("bad host.local"), false);
   assert.equal(isValidHostname("https://app.local"), false);
+});
+
+test("detects protected system host names", () => {
+  assert.equal(isProtectedHostname("localhost"), true);
+  assert.equal(isProtectedHostname("broadcasthost"), true);
+  assert.equal(isProtectedHostname("app.localhost"), true);
+  assert.equal(isProtectedHostname("app.local"), false);
 });
 
 test("applies a managed block while preserving unmanaged content", () => {
@@ -78,6 +90,15 @@ test("reports invalid and duplicate active entries", () => {
   assert.equal(issues.some((message) => message.includes("more than once")), true);
 });
 
+test("reports protected active entries", () => {
+  const issues = validateProfiles([{
+    ...profile,
+    entries: [{ id: "system", ip: "127.0.0.1", host: "localhost", enabled: true }]
+  }]).map((item) => item.message);
+
+  assert.equal(issues.some((message) => message.includes("protected system host")), true);
+});
+
 test("parses active hosts lines", () => {
   const rows = parseHostsText("127.0.0.1 localhost\n# ignored\n10.0.0.2 app.local alias.local # app\n");
 
@@ -85,6 +106,80 @@ test("parses active hosts lines", () => {
   assert.equal(rows[1].host, "app.local");
   assert.deepEqual(rows[1].aliases, ["alias.local"]);
   assert.equal(rows[1].comment, "app");
+});
+
+test("parses disabled hosts rows when requested", () => {
+  const rows = parseHostsRows("# 10.0.0.2 app.local alias.local # app\n", { includeDisabled: true });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].enabled, false);
+  assert.equal(rows[0].host, "app.local");
+  assert.deepEqual(rows[0].aliases, ["alias.local"]);
+  assert.equal(rows[0].comment, "app");
+});
+
+test("extracts managed block", () => {
+  const text = applyManagedBlock("127.0.0.1 localhost\n", profile, { updatedAt: "now" });
+  const block = extractManagedBlock(text);
+
+  assert.match(block, new RegExp(`^${MANAGED_START}`));
+  assert.match(block, new RegExp(`${MANAGED_END}$`));
+});
+
+test("finds unmanaged primary and alias host conflicts", () => {
+  const hostsText = [
+    "127.0.0.1 localhost",
+    "10.0.0.1 app.local",
+    "10.0.0.2 other.local api.local"
+  ].join("\n");
+  const conflicts = findManagedHostConflicts(hostsText, profile);
+
+  assert.deepEqual(conflicts.map((row) => row.lineNumber), [2, 3]);
+  assert.deepEqual(conflicts.map((row) => row.matches), [["app.local"], ["api.local"]]);
+});
+
+test("builds hosts text by replacing primary and alias conflicts", () => {
+  const hostsText = [
+    "127.0.0.1 localhost",
+    "10.0.0.1 app.local",
+    "10.0.0.2 other.local api.local",
+    "10.0.0.3 keep.local"
+  ].join("\n");
+  const next = buildHostsText(hostsText, profile, { updatedAt: "now" });
+
+  assert.match(next, /127\.0\.0\.1 localhost/);
+  assert.match(next, /10\.0\.0\.3 keep\.local/);
+  assert.doesNotMatch(next, /10\.0\.0\.1 app\.local/);
+  assert.doesNotMatch(next, /10\.0\.0\.2 other\.local api\.local/);
+  assert.match(next, /127\.0\.0\.1\tapp\.local/);
+  assert.match(next, /# 10\.10\.0\.5\tapi\.local/);
+});
+
+test("preserves protected system hosts when building hosts text", () => {
+  const protectedProfile = {
+    ...profile,
+    entries: [
+      { id: "system", ip: "127.0.0.1", host: "localhost", enabled: false },
+      { id: "app", ip: "127.0.0.1", host: "app.local", enabled: true }
+    ]
+  };
+  const hostsText = "127.0.0.1 localhost\n255.255.255.255 broadcasthost\n::1 localhost\n";
+  const next = buildHostsText(hostsText, protectedProfile, { updatedAt: "now" });
+
+  assert.match(next, /^127\.0\.0\.1 localhost/);
+  assert.match(next, /255\.255\.255\.255 broadcasthost/);
+  assert.match(next, /::1 localhost/);
+  assert.doesNotMatch(next, /# 127\.0\.0\.1\tlocalhost/);
+  assert.match(next, /127\.0\.0\.1\tapp\.local/);
+});
+
+test("does not report protected system rows as managed conflicts", () => {
+  const protectedProfile = {
+    ...profile,
+    entries: [{ id: "system", ip: "127.0.0.1", host: "localhost", enabled: false }]
+  };
+
+  assert.deepEqual(findManagedHostConflicts("127.0.0.1 localhost\n", protectedProfile), []);
 });
 
 test("round trips profile JSON", () => {

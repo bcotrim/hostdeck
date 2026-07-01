@@ -1,12 +1,12 @@
 import {
-  MANAGED_END,
-  MANAGED_START,
-  isValidHostname,
-  isValidIp,
+  buildHostsText,
+  extractManagedBlock,
+  findManagedHostConflicts,
+  isProtectedHostname,
   normalizeEntry,
   normalizeProfile,
+  parseHostsRows,
   renderManagedBlock,
-  stripManagedBlock,
   validateProfiles
 } from "./lib/hosts.js";
 
@@ -30,15 +30,22 @@ root.addEventListener("click", handleClick);
 root.addEventListener("input", handleInput);
 root.addEventListener("change", handleChange);
 document.addEventListener("keydown", handleKeydown, true);
+window.addEventListener("beforeunload", handleBeforeUnload);
 
 render();
-loadHostsFromDisk();
+if (state.dirty && invokeNative) {
+  showToast("Unsaved edits restored. Reload /etc/hosts to discard.", "warn");
+} else {
+  loadHostsFromDisk();
+}
 
 function render(options = {}) {
   const entries = filteredEntries();
   const activeCount = state.entries.filter((entry) => entry.enabled).length;
   const inactiveCount = state.entries.length - activeCount;
   const issues = validateProfiles([environmentProfile()]);
+  const issueLookup = buildIssueLookup(issues);
+  const firstIssue = issues[0];
   const isReady = state.dirty && issues.length === 0;
   const sourceLabel = invokeNative ? state.hostsPath : "Browser preview";
   const syncLabel = state.loading ? "Loading" : issues.length ? `${issues.length} issue${issues.length === 1 ? "" : "s"}` : state.dirty ? "Edited" : "In sync";
@@ -59,7 +66,7 @@ function render(options = {}) {
           <div class="summary-strip" aria-label="Hosts summary">
             <span><strong>${activeCount}</strong> active</span>
             <span><strong>${inactiveCount}</strong> inactive</span>
-            <span class="status-pill ${syncState}"><span class="sync-dot"></span>${e(syncLabel)}</span>
+            <span class="status-pill ${syncState}" title="${e(firstIssue?.message || syncLabel)}"><span class="sync-dot"></span>${e(syncLabel)}</span>
           </div>
         </header>
 
@@ -73,14 +80,14 @@ function render(options = {}) {
 
           <label class="search">
             ${icon("search")}
-            <input id="search" type="search" placeholder="search hosts, ips, comments" value="${e(state.search)}">
+            <input id="search" type="search" placeholder="search hosts, ips, comments" aria-label="Search hosts, IPs, and comments" value="${e(state.search)}">
             <kbd>⌘K</kbd>
           </label>
 
           <div class="actions">
-            <button class="square-button" data-action="reload" title="Reload /etc/hosts">${icon("refresh")}</button>
-            <button class="square-button is-hot ${isReady ? "is-ready" : ""}" data-action="sync-hosts" title="${state.dirty ? "Apply & flush DNS" : "Flush DNS"}">${icon("zap")}</button>
-            <button class="add-button" data-action="add-entry">${icon("plus")}<span>add entry</span><kbd>⌘N</kbd></button>
+            <button class="square-button" data-action="reload" title="Reload /etc/hosts" aria-label="Reload /etc/hosts">${icon("refresh")}</button>
+            <button class="square-button is-hot ${isReady ? "is-ready" : ""}" data-action="sync-hosts" title="${state.dirty ? "Apply & flush DNS" : "Flush DNS"}" aria-label="${state.dirty ? "Apply and flush DNS" : "Flush DNS"}">${icon("zap")}</button>
+            <button class="add-button" data-action="add-entry" aria-label="Add entry">${icon("plus")}<span>add entry</span><kbd>⌘N</kbd></button>
           </div>
         </section>
 
@@ -88,7 +95,7 @@ function render(options = {}) {
           <table class="entries-table">
             <thead>
               <tr>
-                <th class="check-cell"><input type="checkbox" ${allSelected() ? "checked" : ""} data-action="select-visible"></th>
+                <th class="check-cell"><input type="checkbox" ${allSelected() ? "checked" : ""} data-action="select-visible" aria-label="Select visible entries"></th>
                 <th>Status</th>
                 <th>IP</th>
                 <th>Domain</th>
@@ -97,7 +104,7 @@ function render(options = {}) {
               </tr>
             </thead>
             <tbody>
-              ${entries.length ? entries.map(renderRow).join("") : emptyRow()}
+              ${entries.length ? entries.map((entry) => renderRow(entry, issueLookup)).join("") : emptyRow()}
             </tbody>
           </table>
         </section>
@@ -106,6 +113,7 @@ function render(options = {}) {
           <div class="sync-status">
             <span class="sync-dot ${syncState}"></span>
             <strong>${e(syncLabel)}</strong>
+            ${firstIssue ? issueButton(firstIssue) : ""}
             <span>·</span>
             <span>${e(sourceLabel)}</span>
             <span>·</span>
@@ -113,7 +121,7 @@ function render(options = {}) {
             <span>·</span>
             <span>${activeCount}/${state.entries.length} active</span>
             <span>·</span>
-            <button data-action="backup-now">Backup</button>
+            <button data-action="backup-now" aria-label="Back up /etc/hosts">Backup</button>
             <span>·</span>
             <span>${state.lastAppliedAt ? formatRelative(state.lastAppliedAt) : "just now"}</span>
           </div>
@@ -133,23 +141,39 @@ function filterButton(filter, label, count) {
   `;
 }
 
-function renderRow(entry) {
+function renderRow(entry, issueLookup = new Map()) {
   const muted = entry.enabled ? "" : "is-muted";
+  const label = e(entry.host || entry.ip || "entry");
+  const ipIssue = issueLookup.get(issueKey(entry.id, "ip"));
+  const hostIssue = issueLookup.get(issueKey(entry.id, "host"));
+  const commentIssue = issueLookup.get(issueKey(entry.id, "comment"));
+  const rowClass = [muted, ipIssue || hostIssue || commentIssue ? "has-issue" : ""].filter(Boolean).join(" ");
   return `
-    <tr class="${muted}" data-id="${entry.id}">
-      <td class="check-cell"><input type="checkbox" data-action="select-entry" data-id="${entry.id}" ${entry.selected ? "checked" : ""}></td>
+    <tr class="${rowClass}" data-id="${entry.id}">
+      <td class="check-cell"><input type="checkbox" data-action="select-entry" data-id="${entry.id}" aria-label="Select ${label}" ${entry.selected ? "checked" : ""}></td>
       <td>
         <label class="switch">
-          <input type="checkbox" data-action="toggle-entry" data-id="${entry.id}" ${entry.enabled ? "checked" : ""}>
+          <input type="checkbox" data-action="toggle-entry" data-id="${entry.id}" aria-label="${entry.enabled ? "Disable" : "Enable"} ${label}" ${entry.enabled ? "checked" : ""}>
           <span></span>
         </label>
       </td>
-      <td><input class="cell-input mono" data-field="ip" data-id="${entry.id}" value="${e(entry.ip)}"></td>
-      <td><input class="cell-input mono domain" data-field="host" data-id="${entry.id}" value="${e(entry.host)}"></td>
-      <td><input class="cell-input" data-field="comment" data-id="${entry.id}" value="${e(entry.comment)}"></td>
-      <td class="actions-cell"><button class="row-action" data-action="delete-entry" data-id="${entry.id}" title="Delete">${icon("trash")}</button></td>
+      <td><input class="cell-input mono ${ipIssue ? "is-invalid" : ""}" data-field="ip" data-id="${entry.id}" aria-label="IP for ${label}" value="${e(entry.ip)}" ${issueAttrs(ipIssue)}></td>
+      <td><input class="cell-input mono domain ${hostIssue ? "is-invalid" : ""}" data-field="host" data-id="${entry.id}" aria-label="Domain for ${label}" value="${e(entry.host)}" ${issueAttrs(hostIssue)}></td>
+      <td><input class="cell-input ${commentIssue ? "is-invalid" : ""}" data-field="comment" data-id="${entry.id}" aria-label="Comment for ${label}" value="${e(entry.comment)}" ${issueAttrs(commentIssue)}></td>
+      <td class="actions-cell"><button class="row-action" data-action="delete-entry" data-id="${entry.id}" title="Delete" aria-label="Delete ${label}">${icon("trash")}</button></td>
     </tr>
   `;
+}
+
+function issueButton(issue) {
+  return `
+    <span>·</span>
+    <button class="issue-link" data-action="focus-issue" data-entry-id="${e(issue.entryId)}" data-field="${e(issue.field)}">${e(issue.message)}</button>
+  `;
+}
+
+function issueAttrs(issue) {
+  return issue ? `aria-invalid="true" title="${e(issue.message)}"` : "";
 }
 
 function emptyRow() {
@@ -183,13 +207,8 @@ function handleClick(event) {
     return;
   }
 
-  if (action === "select-all") {
-    const selected = !allSelected();
-    filteredEntries().forEach((entry) => {
-      entry.selected = selected;
-    });
-    saveState();
-    render();
+  if (action === "focus-issue") {
+    focusIssue(button.dataset.entryId, button.dataset.field);
     return;
   }
 
@@ -208,7 +227,7 @@ function handleClick(event) {
   }
 
   if (action === "reload") {
-    loadHostsFromDisk();
+    reloadHostsFromDisk();
     return;
   }
 }
@@ -229,6 +248,12 @@ function handleKeydown(event) {
   }
 }
 
+function handleBeforeUnload(event) {
+  if (!state.dirty) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
 function handleInput(event) {
   const target = event.target;
   if (target.id === "search") {
@@ -241,9 +266,19 @@ function handleInput(event) {
   if (!target.dataset.field) return;
   const entry = findEntry(target.dataset.id);
   if (!entry) return;
-  entry[target.dataset.field] = target.dataset.field === "host" ? target.value.trim().toLowerCase() : target.value.trim();
+  const field = target.dataset.field;
+  const selectionStart = target.selectionStart;
+  const selectionEnd = target.selectionEnd;
+  entry[field] = field === "host" ? target.value.toLowerCase() : target.value;
   state.dirty = true;
   saveState();
+  render({
+    focus: {
+      selector: `[data-field="${field}"][data-id="${entry.id}"]`,
+      selectionStart,
+      selectionEnd
+    }
+  });
 }
 
 function addEntry() {
@@ -302,6 +337,9 @@ async function applyEntries() {
     return;
   }
 
+  const conflicts = findManagedHostConflicts(state.hostsText, profile);
+  if (conflicts.length && !confirmUnmanagedReplacements(conflicts)) return;
+
   const hostsText = nextHostsText();
   if (!invokeNative) {
     state.hostsText = hostsText;
@@ -319,7 +357,10 @@ async function applyEntries() {
   render();
 
   try {
-    const result = await invokeNative("write_hosts", { contents: hostsText });
+    const result = await invokeNative("write_hosts", {
+      contents: hostsText,
+      expectedModifiedAt: state.hostsModifiedAt ?? null
+    });
     state.hostsText = hostsText;
     state.lastAppliedAt = new Date().toISOString();
     state.backupCount += 1;
@@ -333,6 +374,15 @@ async function applyEntries() {
     showToast(String(error), "warn");
     render();
   }
+}
+
+function confirmUnmanagedReplacements(conflicts) {
+  const preview = conflicts.slice(0, 4).map((row) => `${row.matches.join(", ")} on line ${row.lineNumber}`).join("; ");
+  const extra = conflicts.length > 4 ? `, and ${conflicts.length - 4} more` : "";
+  const rows = conflicts.length === 1 ? "row" : "rows";
+  return window.confirm(
+    `Hostdeck will move ${conflicts.length} existing unmanaged host ${rows} into its managed block and remove the original ${rows}.\n\n${preview}${extra}\n\nContinue?`
+  );
 }
 
 function filteredEntries() {
@@ -351,9 +401,10 @@ function filteredEntries() {
 
 function renderEntriesOnly() {
   const entries = filteredEntries();
+  const issueLookup = buildIssueLookup(validateProfiles([environmentProfile()]));
   const tbody = root.querySelector(".entries-table tbody");
   if (tbody) {
-    tbody.innerHTML = entries.length ? entries.map(renderRow).join("") : emptyRow();
+    tbody.innerHTML = entries.length ? entries.map((entry) => renderRow(entry, issueLookup)).join("") : emptyRow();
   }
 
   const visibleCheckbox = root.querySelector('[data-action="select-visible"]');
@@ -371,15 +422,7 @@ function environmentProfile() {
 }
 
 function nextHostsText() {
-  const profile = environmentProfile();
-  const managedHosts = new Set(profile.entries.map((entry) => entry.host.toLowerCase()).filter(Boolean));
-  const base = stripManagedBlock(state.hostsText)
-    .split(/\r?\n/)
-    .filter((line) => !lineContainsHost(line, managedHosts))
-    .join("\n")
-    .trimEnd();
-  const block = renderManagedBlock(profile);
-  return `${base ? `${base}\n\n` : ""}${block}\n`;
+  return buildHostsText(state.hostsText, environmentProfile());
 }
 
 function allSelected() {
@@ -389,6 +432,30 @@ function allSelected() {
 
 function findEntry(entryId) {
   return state.entries.find((entry) => entry.id === entryId);
+}
+
+function focusIssue(entryId, field) {
+  if (!entryId || !field) return;
+  const entry = findEntry(entryId);
+  if (!entry) return;
+
+  state.search = "";
+  state.filter = "all";
+  saveState();
+  render({
+    focus: {
+      selector: `[data-field="${field}"][data-id="${entry.id}"]`,
+      select: true
+    }
+  });
+}
+
+function buildIssueLookup(issues) {
+  return new Map(issues.map((item) => [issueKey(item.entryId, item.field), item]));
+}
+
+function issueKey(entryId, field) {
+  return `${entryId}:${field}`;
 }
 
 function markDirty(options = {}) {
@@ -431,6 +498,7 @@ function defaultState() {
     loading: false,
     hostsPath: "/etc/hosts",
     hostsText: DEFAULT_HOSTS,
+    hostsModifiedAt: null,
     lastAppliedAt: null,
     entries: invokeNative ? [] : [
       row("app", "127.0.0.1", "app.dev.acme.local", "Next.js front-end", true),
@@ -467,6 +535,11 @@ async function loadHostsFromDisk(options = {}) {
     showToast(String(error), "warn");
     render();
   }
+}
+
+function reloadHostsFromDisk() {
+  if (state.dirty && !window.confirm("Discard unsaved Hostdeck edits and reload /etc/hosts?")) return;
+  loadHostsFromDisk();
 }
 
 async function flushDns() {
@@ -527,7 +600,7 @@ function syncEntriesFromHosts(hostsText) {
 
 function entriesFromHosts(hostsText) {
   const source = extractManagedBlock(hostsText) || hostsText;
-  const rows = parseHostsRows(source).filter((row) => !isSystemHostsRow(row));
+  const rows = parseHostsRows(source, { includeDisabled: true }).filter((row) => row.validIp && row.validHost && !isProtectedHostname(row.host));
   const order = [];
   const byHost = new Map();
 
@@ -549,52 +622,6 @@ function entriesFromHosts(hostsText) {
       selected: false
     });
   });
-}
-
-function parseHostsRows(source) {
-  return String(source)
-    .split(/\r?\n/)
-    .map(parseHostsRow)
-    .filter(Boolean);
-}
-
-function parseHostsRow(line) {
-  const raw = String(line);
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-
-  const enabled = !trimmed.startsWith("#");
-  const candidate = enabled ? raw : trimmed.replace(/^#+\s*/, "");
-  const [body, ...commentParts] = candidate.split("#");
-  const parts = body.trim().split(/\s+/).filter(Boolean);
-  if (parts.length < 2) return null;
-
-  const [ip, host] = parts;
-  if (!isValidIp(ip) || !isValidHostname(host)) return null;
-
-  return {
-    ip,
-    host,
-    comment: commentParts.join("#").trim(),
-    enabled
-  };
-}
-
-function extractManagedBlock(hostsText) {
-  const start = hostsText.indexOf(MANAGED_START);
-  const end = hostsText.indexOf(MANAGED_END);
-  if (start === -1 || end === -1 || end < start) return "";
-  return hostsText.slice(start, end + MANAGED_END.length);
-}
-
-function lineContainsHost(line, hosts) {
-  const row = parseHostsRow(line);
-  return row ? hosts.has(row.host.toLowerCase()) : false;
-}
-
-function isSystemHostsRow(row) {
-  const host = row.host.toLowerCase();
-  return host === "localhost" || host === "broadcasthost" || host.endsWith(".localhost");
 }
 
 function entryId(host) {
