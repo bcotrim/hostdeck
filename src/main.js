@@ -41,28 +41,45 @@ function render(options = {}) {
   const isReady = state.dirty && issues.length === 0;
   const sourceLabel = invokeNative ? state.hostsPath : "Browser preview";
   const syncLabel = state.loading ? "Loading" : issues.length ? `${issues.length} issue${issues.length === 1 ? "" : "s"}` : state.dirty ? "Edited" : "In sync";
+  const syncState = state.loading ? "is-loading" : issues.length ? "is-warn" : state.dirty ? "is-dirty" : "is-sync";
 
   root.innerHTML = `
     <main class="desktop-shell">
       <section class="window">
+        <header class="titlebar">
+          <div class="brand-lockup">
+            <span class="prompt-mark" aria-hidden="true"><span>~</span><strong>$</strong><i></i></span>
+            <div>
+              <h1>hostdeck</h1>
+              <p>${e(sourceLabel)}</p>
+            </div>
+          </div>
+
+          <div class="summary-strip" aria-label="Hosts summary">
+            <span><strong>${activeCount}</strong> active</span>
+            <span><strong>${inactiveCount}</strong> inactive</span>
+            <span class="status-pill ${syncState}"><span class="sync-dot"></span>${e(syncLabel)}</span>
+          </div>
+        </header>
+
         <section class="toolbar">
           <div class="filters" aria-label="Entry filters">
-            ${filterButton("all", "All", state.entries.length)}
-            ${filterButton("active", "Active", activeCount)}
-            ${filterButton("inactive", "Inactive", inactiveCount)}
+            ${filterButton("all", "all", state.entries.length)}
+            ${filterButton("active", "active", activeCount)}
+            ${filterButton("inactive", "inactive", inactiveCount)}
             <span class="entry-total">${state.entries.length} entries</span>
           </div>
 
           <label class="search">
             ${icon("search")}
-            <input id="search" type="search" placeholder="Search entries, IPs, comments..." value="${e(state.search)}">
+            <input id="search" type="search" placeholder="search hosts, ips, comments" value="${e(state.search)}">
             <kbd>⌘K</kbd>
           </label>
 
           <div class="actions">
             <button class="square-button" data-action="reload" title="Reload /etc/hosts">${icon("refresh")}</button>
             <button class="square-button is-hot ${isReady ? "is-ready" : ""}" data-action="sync-hosts" title="${state.dirty ? "Apply & flush DNS" : "Flush DNS"}">${icon("zap")}</button>
-            <button class="add-button" data-action="add-entry">${icon("plus")}<span>Add entry</span><kbd>⌘N</kbd></button>
+            <button class="add-button" data-action="add-entry">${icon("plus")}<span>add entry</span><kbd>⌘N</kbd></button>
           </div>
         </section>
 
@@ -86,7 +103,7 @@ function render(options = {}) {
 
         <footer class="statusbar">
           <div class="sync-status">
-            <span class="sync-dot"></span>
+            <span class="sync-dot ${syncState}"></span>
             <strong>${e(syncLabel)}</strong>
             <span>·</span>
             <span>${e(sourceLabel)}</span>
