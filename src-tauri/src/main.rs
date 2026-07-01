@@ -41,13 +41,13 @@ fn read_hosts() -> Result<HostsState, String> {
 #[tauri::command]
 fn write_hosts(
     contents: String,
-    expected_modified_at: Option<u64>,
+    expected_contents: Option<String>,
 ) -> Result<PrivilegedResult, String> {
     if contents.trim().is_empty() {
         return Err("Refusing to write an empty hosts file.".to_string());
     }
 
-    ensure_hosts_unchanged(expected_modified_at)?;
+    ensure_hosts_unchanged(expected_contents.as_deref())?;
 
     let timestamp = timestamp_token()?;
     let temp_path = write_temp_hosts(&contents, &timestamp)?;
@@ -128,22 +128,28 @@ fn write_temp_hosts(contents: &str, timestamp: &str) -> Result<PathBuf, String> 
     Err("Could not create a unique temporary hosts file.".to_string())
 }
 
-fn ensure_hosts_unchanged(expected_modified_at: Option<u64>) -> Result<(), String> {
-    let Some(expected) = expected_modified_at else {
+fn ensure_hosts_unchanged(expected_contents: Option<&str>) -> Result<(), String> {
+    ensure_file_contents_unchanged(HOSTS_PATH, expected_contents)
+}
+
+fn ensure_file_contents_unchanged(
+    path: &str,
+    expected_contents: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected) = expected_contents else {
         return Ok(());
     };
 
-    let current = fs::metadata(HOSTS_PATH)
-        .map_err(|error| format!("Could not inspect {HOSTS_PATH}: {error}"))?
-        .modified()
-        .ok()
-        .and_then(system_time_millis);
+    let current = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read {path} before writing: {error}"))?;
 
-    if current == Some(expected) {
+    if current == expected {
         return Ok(());
     }
 
-    Err("Refusing to overwrite /etc/hosts because it changed since it was loaded. Reload and try again.".to_string())
+    Err(format!(
+        "Refusing to overwrite {path} because it changed since it was loaded. Reload /etc/hosts and try again."
+    ))
 }
 
 fn run_privileged_shell(script: &str) -> Result<(), String> {
@@ -224,5 +230,37 @@ mod tests {
 
         let _ = fs::remove_file(first);
         let _ = fs::remove_file(second);
+    }
+
+    #[test]
+    fn accepts_unchanged_expected_hosts_contents() {
+        let path = test_temp_path("unchanged");
+        fs::write(&path, "127.0.0.1 localhost\n").unwrap();
+
+        let result =
+            ensure_file_contents_unchanged(path.to_str().unwrap(), Some("127.0.0.1 localhost\n"));
+
+        let _ = fs::remove_file(path);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejects_changed_expected_hosts_contents() {
+        let path = test_temp_path("changed");
+        fs::write(&path, "127.0.0.1 localhost\n").unwrap();
+
+        let result =
+            ensure_file_contents_unchanged(path.to_str().unwrap(), Some("127.0.0.1 stale.local\n"));
+
+        let _ = fs::remove_file(path);
+        assert!(result.is_err());
+    }
+
+    fn test_temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "hostdeck-test-{name}-{}-{}",
+            std::process::id(),
+            timestamp_token().unwrap()
+        ))
     }
 }

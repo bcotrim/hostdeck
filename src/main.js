@@ -329,7 +329,7 @@ function handleChange(event) {
   }
 }
 
-async function applyEntries() {
+async function applyEntries(options = {}) {
   const profile = environmentProfile();
   const issues = validateProfiles([profile]);
   if (issues.length) {
@@ -359,7 +359,7 @@ async function applyEntries() {
   try {
     const result = await invokeNative("write_hosts", {
       contents: hostsText,
-      expectedModifiedAt: state.hostsModifiedAt ?? null
+      expectedContents: state.hostsText
     });
     state.hostsText = hostsText;
     state.lastAppliedAt = new Date().toISOString();
@@ -369,11 +369,23 @@ async function applyEntries() {
     showToast(`Applied. Backup: ${result.backup_path}`);
     await loadHostsFromDisk({ quiet: true });
   } catch (error) {
+    if (!options.retriedAfterReload && isStaleHostsError(error)) {
+      const reloaded = await loadHostsFromDisk({ keepDirty: true, preserveEntries: true, quiet: true });
+      if (reloaded) {
+        await applyEntries({ retriedAfterReload: true });
+        return;
+      }
+    }
+
     state.loading = false;
     saveState();
     showToast(String(error), "warn");
     render();
   }
+}
+
+function isStaleHostsError(error) {
+  return String(error).includes("changed since it was loaded");
 }
 
 function confirmUnmanagedReplacements(conflicts) {
@@ -523,17 +535,19 @@ async function loadHostsFromDisk(options = {}) {
     state.hostsText = hosts.contents;
     state.hostsPath = hosts.path;
     state.hostsModifiedAt = hosts.modified_at;
-    syncEntriesFromHosts(hosts.contents);
+    if (!options.preserveEntries) syncEntriesFromHosts(hosts.contents);
     state.loading = false;
-    state.dirty = false;
+    state.dirty = Boolean(options.keepDirty);
     saveState();
     if (!options.quiet) showToast(`Loaded ${hosts.path}.`);
     render();
+    return true;
   } catch (error) {
     state.loading = false;
     saveState();
     showToast(String(error), "warn");
     render();
+    return false;
   }
 }
 
