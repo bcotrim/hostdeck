@@ -2,19 +2,19 @@
 
 :root {
   color-scheme: dark;
-  --ink-950: #080b0a;
-  --ink-900: #0c100e;
-  --ink-850: #11150f;
-  --ink-800: #161b18;
-  --ink-750: #1b211d;
-  --ink-700: #222925;
-  --ink-600: #2c332e;
-  --ink-500: #3a423c;
-  --ink-400: #566159;
-  --ink-300: #7e8a82;
-  --ink-200: #a9b3ac;
-  --ink-100: #d3dad5;
-  --ink-50: #ecf1ed;
+  --ink-950: #080808;
+  --ink-900: #0d0d0d;
+  --ink-850: #121212;
+  --ink-800: #181818;
+  --ink-750: #1e1e1e;
+  --ink-700: #262626;
+  --ink-600: #303030;
+  --ink-500: #3d3d3d;
+  --ink-400: #5a5a5a;
+  --ink-300: #838383;
+  --ink-200: #acacac;
+  --ink-100: #d5d5d5;
+  --ink-50: #ededed;
   --green-600: #2fbf66;
   --green-500: #3fe07b;
   --green-400: #5ceb92;
@@ -37,6 +37,9 @@
   --surface-inset: var(--ink-950);
   --surface-hover: rgba(255, 255, 255, 0.04);
   --surface-active: rgba(255, 255, 255, 0.07);
+  --surface-row: rgba(18, 18, 18, 0.82);
+  --surface-row-alt: rgba(24, 24, 24, 0.58);
+  --surface-row-hover: rgba(255, 255, 255, 0.035);
   --text-primary: var(--ink-50);
   --text-secondary: var(--ink-200);
   --text-tertiary: var(--ink-300);
@@ -57,6 +60,7 @@
   --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.4), 0 8px 20px rgba(0, 0, 0, 0.45);
   --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --macos-controls-reserve: 90px;
   --dur-fast: 130ms;
   --dur-medium: 200ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
@@ -78,9 +82,7 @@ body {
   min-height: 100vh;
   overflow: hidden;
   color: var(--text-primary);
-  background:
-    radial-gradient(circle at 50% -10%, rgba(63, 224, 123, 0.1), transparent 34%),
-    var(--surface-app);
+  background: var(--surface-app);
   font: 400 14px/1.55 var(--font-sans);
   text-rendering: optimizeLegibility;
 }
@@ -147,10 +149,14 @@ input:focus-visible {
   flex: 0 0 auto;
   justify-content: space-between;
   gap: 16px;
-  min-height: 72px;
+  min-height: 46px;
   padding: 0 22px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--surface-base);
+}
+
+.is-native-shell .titlebar {
+  padding-left: calc(22px + var(--macos-controls-reserve));
 }
 
 .brand-lockup {
@@ -162,8 +168,8 @@ input:focus-visible {
   flex: 0 0 auto;
   justify-content: center;
   gap: 4px;
-  width: 58px;
-  height: 38px;
+  width: 50px;
+  height: 30px;
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
   color: var(--text-muted);
@@ -179,8 +185,8 @@ input:focus-visible {
 }
 
 .prompt-mark i {
-  width: 8px;
-  height: 14px;
+  width: 7px;
+  height: 12px;
   margin-left: 2px;
   background: var(--accent);
   animation: cursor-blink 1.05s steps(2, end) infinite;
@@ -193,7 +199,7 @@ input:focus-visible {
 
 .brand-lockup h1 {
   color: var(--text-primary);
-  font: 600 18px/1.1 var(--font-sans);
+  font: 600 15px/1.05 var(--font-sans);
   letter-spacing: 0;
 }
 
@@ -201,7 +207,7 @@ input:focus-visible {
   max-width: 52vw;
   overflow: hidden;
   color: var(--text-tertiary);
-  font: 500 12px/1.45 var(--font-mono);
+  font: 500 10.5px/1.3 var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -337,6 +343,7 @@ th {
 }
 
 .search {
+  position: relative;
   flex: 1 1 320px;
   min-width: 220px;
   max-width: 600px;
@@ -352,9 +359,14 @@ th {
 }
 
 .search:focus-within {
+  color: var(--text-secondary);
   border-color: var(--border-accent);
   background: var(--surface-card);
   box-shadow: var(--glow-sm);
+}
+
+.search:focus-within .icon {
+  color: var(--text-secondary);
 }
 
 .search input {
@@ -367,8 +379,22 @@ th {
   font-size: 14px;
 }
 
+.search input:focus-visible {
+  box-shadow: none;
+}
+
 .search input::placeholder {
   color: var(--text-muted);
+}
+
+.search:focus-within input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.search:focus-within kbd {
+  color: var(--text-tertiary);
+  border-color: var(--border-default);
+  background: var(--surface-raised);
 }
 
 kbd {
@@ -447,9 +473,9 @@ kbd {
 .add-button kbd {
   min-width: 26px;
   height: 22px;
-  color: rgba(6, 32, 18, 0.58);
+  color: rgba(0, 0, 0, 0.58);
   border: 0;
-  background: rgba(6, 32, 18, 0.1);
+  background: rgba(0, 0, 0, 0.12);
 }
 
 .table-wrap {
@@ -503,12 +529,16 @@ td {
 }
 
 tbody tr {
-  background: rgba(17, 21, 15, 0.72);
+  background: var(--surface-row);
   transition: background-color var(--dur-fast) var(--ease-standard);
 }
 
+tbody tr:nth-child(even) {
+  background: var(--surface-row-alt);
+}
+
 tbody tr:hover {
-  background: var(--surface-hover);
+  background: var(--surface-row-hover);
 }
 
 tbody tr.is-muted {
@@ -561,13 +591,13 @@ input[type="checkbox"] {
 }
 
 .switch input:checked + span {
-  border-color: var(--border-accent);
-  background: var(--accent-wash);
+  border-color: var(--border-default);
+  background: var(--surface-raised);
 }
 
 .switch input:checked + span::after {
   background: var(--accent);
-  box-shadow: 0 0 12px var(--green-glow);
+  box-shadow: none;
   transform: translateX(16px);
 }
 
@@ -754,6 +784,10 @@ input[type="checkbox"] {
     flex-direction: column;
     min-height: auto;
     padding: 14px;
+  }
+
+  .is-native-shell .titlebar {
+    padding-left: calc(14px + var(--macos-controls-reserve));
   }
 
   .brand-lockup p {

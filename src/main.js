@@ -20,6 +20,7 @@ const DEFAULT_HOSTS = `##
 ::1             localhost
 `;
 const invokeNative = window.__TAURI__?.core?.invoke ?? null;
+document.documentElement.classList.toggle("is-native-shell", Boolean(invokeNative));
 
 const root = document.querySelector("#app");
 let state = loadState();
@@ -46,7 +47,7 @@ function render(options = {}) {
   root.innerHTML = `
     <main class="desktop-shell">
       <section class="window">
-        <header class="titlebar">
+        <header class="titlebar" data-tauri-drag-region="deep">
           <div class="brand-lockup">
             <span class="prompt-mark" aria-hidden="true"><span>~</span><strong>$</strong><i></i></span>
             <div>
