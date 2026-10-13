@@ -522,8 +522,9 @@ td {
 }
 
 .actions-cell {
-  width: 88px;
+  width: 100px;
   text-align: right;
+  white-space: nowrap;
 }
 
 tbody tr {
@@ -665,6 +666,17 @@ input[type="checkbox"] {
   color: var(--red-500);
   border-color: rgba(240, 85, 92, 0.24);
   background: var(--red-wash);
+}
+
+.favorite-action:hover,
+.favorite-action.is-favorite {
+  color: var(--accent);
+  border-color: var(--border-accent);
+  background: var(--accent-wash);
+}
+
+.favorite-action.is-favorite .icon {
+  fill: currentColor;
 }
 
 .empty {

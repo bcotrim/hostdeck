@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -7,8 +7,14 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tauri::{
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    tray::TrayIconBuilder,
+    Emitter, Manager,
+};
 
 const HOSTS_PATH: &str = "/etc/hosts";
+const TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/tray.png");
 
 #[derive(Serialize)]
 struct HostsState {
@@ -20,6 +26,99 @@ struct HostsState {
 #[derive(Serialize)]
 struct PrivilegedResult {
     backup_path: String,
+}
+
+#[derive(Deserialize)]
+struct TrayEntry {
+    id: String,
+    host: String,
+    ip: String,
+    enabled: bool,
+}
+
+#[tauri::command]
+fn update_tray(
+    app: tauri::AppHandle,
+    entries: Vec<TrayEntry>,
+    dirty: bool,
+    busy: bool,
+) -> Result<(), String> {
+    let update = || -> tauri::Result<()> {
+        let Some(tray) = app.tray_by_id("hostdeck") else {
+            return Ok(());
+        };
+        let menu = Menu::new(&app)?;
+        let active = entries.iter().filter(|entry| entry.enabled).count();
+        let status = if busy {
+            "Working…".to_string()
+        } else if dirty {
+            "Apply or discard edits in Hostdeck to toggle".to_string()
+        } else if entries.is_empty() {
+            "Star entries in Hostdeck to add favorites".to_string()
+        } else {
+            format!("{active}/{} favorites active", entries.len())
+        };
+        menu.append(&MenuItem::new(&app, &status, false, None::<&str>)?)?;
+        for entry in &entries {
+            menu.append(&CheckMenuItem::with_id(
+                &app,
+                format!("favorite:{}", entry.id),
+                format!("{} · {}", entry.host, entry.ip),
+                !dirty && !busy,
+                entry.enabled,
+                None::<&str>,
+            )?)?;
+        }
+        menu.append(&PredefinedMenuItem::separator(&app)?)?;
+        menu.append(&MenuItem::with_id(
+            &app,
+            "open",
+            "Open Hostdeck",
+            true,
+            None::<&str>,
+        )?)?;
+        menu.append(&MenuItem::with_id(
+            &app,
+            "quit",
+            "Quit Hostdeck",
+            !busy,
+            None::<&str>,
+        )?)?;
+        tray.set_menu(Some(menu))?;
+        tray.set_icon(Some(tray_icon(&TRAY_ICON, active > 0)))?;
+        tray.set_title(None::<&str>)?;
+        tray.set_tooltip(Some(format!("Hostdeck — {status}")))?;
+        Ok(())
+    };
+    update().map_err(|error| format!("Could not update menu bar: {error}"))
+}
+
+fn tray_icon(icon: &tauri::image::Image<'_>, active: bool) -> tauri::image::Image<'static> {
+    let mut rgba = icon.rgba().to_vec();
+    if !active {
+        for pixel in rgba.chunks_exact_mut(4) {
+            let gray =
+                (u16::from(pixel[0]) * 77 + u16::from(pixel[1]) * 150 + u16::from(pixel[2]) * 29)
+                    / 256;
+            pixel[..3].fill(gray as u8);
+        }
+    }
+    tauri::image::Image::new_owned(rgba, icon.width(), icon.height())
+}
+
+#[tauri::command]
+fn open_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -38,7 +137,7 @@ fn read_hosts() -> Result<HostsState, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn write_hosts(
     contents: String,
     expected_contents: Option<String>,
@@ -89,14 +188,62 @@ fn flush_dns() -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            TrayIconBuilder::with_id("hostdeck")
+                .icon(tray_icon(&TRAY_ICON, false))
+                .tooltip("Hostdeck")
+                .menu(&Menu::new(app)?)
+                .on_menu_event(|app, event| {
+                    let result = match event.id.as_ref() {
+                        "open" => open_window(app.clone()),
+                        "quit" => app.emit("tray-quit", ()).map_err(|error| error.to_string()),
+                        id => {
+                            if let Some(id) = id.strip_prefix("favorite:") {
+                                app.emit("tray-toggle", id)
+                                    .map_err(|error| error.to_string())
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    };
+                    if let Err(error) = result {
+                        eprintln!("{error}");
+                    }
+                })
+                .build(app)?;
+            update_tray(app.handle().clone(), vec![], false, true)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.hide().is_ok() {
+                    api.prevent_close();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             backup_hosts,
             flush_dns,
             read_hosts,
-            write_hosts
+            write_hosts,
+            update_tray,
+            open_window,
+            quit_app
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Hostdeck");
+        .build(tauri::generate_context!())
+        .expect("error while building Hostdeck")
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } => {
+                api.prevent_exit();
+                let _ = app.emit("tray-quit", ());
+            }
+            tauri::RunEvent::Reopen { .. } => {
+                let _ = open_window(app.clone());
+            }
+            _ => {}
+        });
 }
 
 fn write_temp_hosts(contents: &str, timestamp: &str) -> Result<PathBuf, String> {
@@ -206,6 +353,22 @@ fn system_time_millis(value: SystemTime) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_icon_is_colored_only_when_active_and_preserves_transparency() {
+        let pixels = vec![60, 200, 120, 255, 10, 20, 30, 64];
+        let icon = tauri::image::Image::new_owned(pixels.clone(), 2, 1);
+        assert_eq!(tray_icon(&icon, true).rgba(), pixels);
+
+        let inactive = tray_icon(&icon, false);
+        assert_eq!((inactive.width(), inactive.height()), (2, 1));
+        for (gray, original) in inactive.rgba().chunks_exact(4).zip(pixels.chunks_exact(4)) {
+            assert_eq!(gray[0], gray[1]);
+            assert_eq!(gray[1], gray[2]);
+            assert_eq!(gray[3], original[3]);
+        }
+        assert_eq!(icon.rgba(), pixels);
+    }
 
     #[test]
     fn quotes_shell_values() {

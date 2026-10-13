@@ -10,6 +10,8 @@ It is built with Tauri and intentionally focuses on one local hosts file: `/etc/
 - Shows active entries and commented-out entries
 - All / Active / Inactive filters
 - Individual row toggles
+- Star favorite entries for quick toggles from the macOS menu bar
+- Menu bar icon is colored when any favorite is active and monochrome otherwise
 - Search by IP, domain, or comment
 - Adds, edits, disables, and deletes host entries
 - Writes a managed hosts block while preserving unmanaged content
@@ -62,6 +64,10 @@ src-tauri/target/release/bundle/macos/Hostdeck.app
 The browser preview uses local state. The Tauri app reads `/etc/hosts` directly.
 
 Writing `/etc/hosts` requires administrator permission on macOS. Hostdeck asks macOS for admin approval only when applying changes, writes a backup first, then flushes DNS.
+
+Menu bar toggles apply immediately using the same backup and administrator approval flow. Apply or discard unsaved edits in the main window before using them. Stars are saved locally and do not modify `/etc/hosts`.
+
+Closing the window keeps Hostdeck in the menu bar. Use **Open Hostdeck** to return or **Quit Hostdeck** to exit. The menu bar is available in the native app; the browser preview supports stars only.
 
 ## License
 

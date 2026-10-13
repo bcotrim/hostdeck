@@ -25,6 +25,9 @@ document.documentElement.classList.toggle("is-native-shell", Boolean(invokeNativ
 const root = document.querySelector("#app");
 let state = loadState();
 let toast = null;
+let trayReady = false;
+let trayUpdate = Promise.resolve();
+let lastTrayPayload = "";
 
 root.addEventListener("click", handleClick);
 root.addEventListener("input", handleInput);
@@ -33,10 +36,80 @@ document.addEventListener("keydown", handleKeydown, true);
 window.addEventListener("beforeunload", handleBeforeUnload);
 
 render();
-if (state.dirty && invokeNative) {
-  showToast("Unsaved edits restored. Reload /etc/hosts to discard.", "warn");
-} else {
-  loadHostsFromDisk();
+initialize();
+
+async function initialize() {
+  if (invokeNative) {
+    try {
+      await window.__TAURI__.event.listen("tray-toggle", (event) => toggleFromTray(event.payload));
+      await window.__TAURI__.event.listen("tray-quit", quitFromTray);
+      trayReady = true;
+      syncTray();
+    } catch (error) {
+      showToast(`Could not connect menu bar: ${error}`, "warn");
+    }
+  }
+  if (state.dirty && invokeNative) {
+    showToast("Unsaved edits restored. Reload /etc/hosts to discard.", "warn");
+  } else {
+    await loadHostsFromDisk();
+  }
+}
+
+function syncTray() {
+  if (!trayReady) return;
+  const appliedByHost = new Map(entriesFromHosts(state.hostsText).map((entry) => [entry.host, entry]));
+  const payload = JSON.stringify({
+    entries: state.entries.filter((entry) => entry.favorite).map((entry) => ({
+      id: entry.id,
+      host: entry.host,
+      ip: entry.ip,
+      enabled: appliedByHost.get(entry.host.toLowerCase())?.enabled ?? false
+    })),
+    dirty: state.dirty,
+    busy: state.loading
+  });
+  if (payload === lastTrayPayload) return;
+  lastTrayPayload = payload;
+  trayUpdate = trayUpdate.then(() => invokeNative("update_tray", JSON.parse(payload))).catch((error) => {
+    lastTrayPayload = "";
+    showToast(String(error), "warn");
+  });
+}
+
+async function toggleFromTray(entryId) {
+  lastTrayPayload = "";
+  if (state.dirty || state.loading) {
+    syncTray();
+    return;
+  }
+  const host = findEntry(entryId)?.host;
+  if (!host) return;
+  if (!await loadHostsFromDisk({ quiet: true })) {
+    await invokeNative("open_window");
+    return;
+  }
+  const entry = state.entries.find((entry) => entry.host === host && entry.favorite);
+  if (!entry) return;
+  entry.enabled = !entry.enabled;
+  state.dirty = true;
+  if (!await applyEntries({ fromTray: true })) {
+    entry.enabled = !entry.enabled;
+    state.dirty = false;
+    // A failed DNS flush can follow a successful write; reread the actual file.
+    await loadHostsFromDisk({ quiet: true });
+    saveState();
+    await invokeNative("open_window");
+  }
+}
+
+async function quitFromTray() {
+  if (state.loading) return;
+  if (state.dirty) {
+    await invokeNative("open_window");
+    if (!window.confirm("Quit Hostdeck? Unsaved edits will be restored next time.")) return;
+  }
+  await invokeNative("quit_app");
 }
 
 function render(options = {}) {
@@ -130,6 +203,7 @@ function render(options = {}) {
       ${toast ? `<div class="toast ${toast.kind}">${e(toast.message)}</div>` : ""}
     </main>
   `;
+  root.querySelectorAll("button, input").forEach((control) => { control.disabled = state.loading; });
   restoreFocus(options.focus);
 }
 
@@ -160,7 +234,10 @@ function renderRow(entry, issueLookup = new Map()) {
       <td><input class="cell-input mono ${ipIssue ? "is-invalid" : ""}" data-field="ip" data-id="${entry.id}" aria-label="IP for ${label}" value="${e(entry.ip)}" ${issueAttrs(ipIssue)}></td>
       <td><input class="cell-input mono domain ${hostIssue ? "is-invalid" : ""}" data-field="host" data-id="${entry.id}" aria-label="Domain for ${label}" value="${e(entry.host)}" ${issueAttrs(hostIssue)}></td>
       <td><input class="cell-input ${commentIssue ? "is-invalid" : ""}" data-field="comment" data-id="${entry.id}" aria-label="Comment for ${label}" value="${e(entry.comment)}" ${issueAttrs(commentIssue)}></td>
-      <td class="actions-cell"><button class="row-action" data-action="delete-entry" data-id="${entry.id}" title="Delete" aria-label="Delete ${label}">${icon("trash")}</button></td>
+      <td class="actions-cell">
+        <button class="row-action favorite-action ${entry.favorite ? "is-favorite" : ""}" data-action="favorite-entry" data-id="${entry.id}" aria-pressed="${entry.favorite}" title="${entry.favorite ? "Remove from" : "Add to"} menu bar" aria-label="${entry.favorite ? "Remove" : "Add"} ${label} ${entry.favorite ? "from" : "to"} menu bar">${icon("star")}</button>
+        <button class="row-action" data-action="delete-entry" data-id="${entry.id}" title="Delete" aria-label="Delete ${label}">${icon("trash")}</button>
+      </td>
     </tr>
   `;
 }
@@ -189,6 +266,15 @@ function handleClick(event) {
   if (!button) return;
 
   const action = button.dataset.action;
+  if (state.loading && action !== "set-filter" && action !== "focus-issue") return;
+  if (action === "favorite-entry") {
+    const entry = findEntry(button.dataset.id);
+    if (!entry) return;
+    entry.favorite = !entry.favorite;
+    saveState();
+    render({ focus: { selector: `[data-action="favorite-entry"][data-id="${entry.id}"]` } });
+    return;
+  }
   if (action === "set-filter") {
     state.filter = button.dataset.filter;
     saveState();
@@ -263,7 +349,7 @@ function handleInput(event) {
     return;
   }
 
-  if (!target.dataset.field) return;
+  if (!target.dataset.field || state.loading) return;
   const entry = findEntry(target.dataset.id);
   if (!entry) return;
   const field = target.dataset.field;
@@ -282,6 +368,7 @@ function handleInput(event) {
 }
 
 function addEntry() {
+  if (state.loading) return;
   const entry = normalizeUiEntry({
     id: id("entry"),
     ip: "127.0.0.1",
@@ -302,6 +389,7 @@ function addEntry() {
 }
 
 function handleChange(event) {
+  if (state.loading) return;
   const target = event.target;
   if (target.dataset.action === "toggle-entry") {
     const entry = findEntry(target.dataset.id);
@@ -330,15 +418,19 @@ function handleChange(event) {
 }
 
 async function applyEntries(options = {}) {
+  if (state.loading) return false;
   const profile = environmentProfile();
   const issues = validateProfiles([profile]);
   if (issues.length) {
     showToast(issues[0].message, "warn");
-    return;
+    return false;
   }
 
   const conflicts = findManagedHostConflicts(state.hostsText, profile);
-  if (conflicts.length && !confirmUnmanagedReplacements(conflicts)) return;
+  if (conflicts.length) {
+    if (options.fromTray) await invokeNative("open_window");
+    if (!confirmUnmanagedReplacements(conflicts)) return false;
+  }
 
   const hostsText = nextHostsText();
   if (!invokeNative) {
@@ -349,7 +441,7 @@ async function applyEntries(options = {}) {
     saveState();
     showToast("Preview applied. Native app writes /etc/hosts.");
     copyText(`${renderManagedBlock(profile)}\n\n${MACOS_DNS_COMMAND}`);
-    return;
+    return true;
   }
 
   state.loading = true;
@@ -368,12 +460,12 @@ async function applyEntries(options = {}) {
     saveState();
     showToast(`Applied. Backup: ${result.backup_path}`);
     await loadHostsFromDisk({ quiet: true });
+    return true;
   } catch (error) {
-    if (!options.retriedAfterReload && isStaleHostsError(error)) {
+    if (!options.fromTray && !options.retriedAfterReload && isStaleHostsError(error)) {
       const reloaded = await loadHostsFromDisk({ keepDirty: true, preserveEntries: true, quiet: true });
       if (reloaded) {
-        await applyEntries({ retriedAfterReload: true });
-        return;
+        return applyEntries({ retriedAfterReload: true });
       }
     }
 
@@ -381,6 +473,7 @@ async function applyEntries(options = {}) {
     saveState();
     showToast(String(error), "warn");
     render();
+    return false;
   }
 }
 
@@ -479,10 +572,11 @@ function markDirty(options = {}) {
 function loadState() {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (stored?.entries?.length) {
+    if (Array.isArray(stored?.entries)) {
       return {
         ...defaultState(),
         ...stored,
+        loading: false,
         entries: stored.entries.map(normalizeUiEntry)
       };
     }
@@ -494,6 +588,7 @@ function loadState() {
 
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  syncTray();
 }
 
 function defaultState() {
@@ -606,7 +701,8 @@ function syncEntriesFromHosts(hostsText) {
   state.entries = [
     ...parsedEntries.map((entry) => ({
       ...entry,
-      selected: previousByHost.get(entry.host.toLowerCase())?.selected ?? false
+      selected: previousByHost.get(entry.host.toLowerCase())?.selected ?? false,
+      favorite: previousByHost.get(entry.host.toLowerCase())?.favorite ?? false
     })),
     ...inactiveEntries
   ];
@@ -649,7 +745,8 @@ function row(idSuffix, ip, host, comment, enabled) {
 function normalizeUiEntry(entry) {
   return {
     ...normalizeEntry(entry),
-    selected: Boolean(entry.selected)
+    selected: Boolean(entry.selected),
+    favorite: Boolean(entry.favorite)
   };
 }
 
@@ -732,7 +829,8 @@ function icon(name) {
     refresh: "M20 12a8 8 0 0 1-13.7 5.7M4 12A8 8 0 0 1 17.7 6.3M18 3v4h-4M6 21v-4h4",
     zap: "m13 2-8 12h7l-1 8 8-12h-7l1-8Z",
     plus: "M12 5v14M5 12h14",
-    trash: "M5 7h14M10 11v6M14 11v6M7 7l1 13h8l1-13M9 7V5h6v2"
+    trash: "M5 7h14M10 11v6M14 11v6M7 7l1 13h8l1-13M9 7V5h6v2",
+    star: "m12 3 2.8 5.7 6.3.9-4.6 4.4 1.1 6.3-5.6-3-5.6 3 1.1-6.3L2.9 9.6l6.3-.9L12 3Z"
   };
 
   return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name] || paths.plus}"></path></svg>`;
