@@ -12,5 +12,8 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSAttributedString", "NSButton", "NSColor", "NSControl", "NSFont", "NSResponder", "NSStatusBarButton", "NSStatusItem", "NSView", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSAttributedString", "NSRange", "NSString"] }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = ["tray-icon"] }

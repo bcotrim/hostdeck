@@ -1,3 +1,6 @@
+use objc2::{rc::Retained, MainThreadMarker};
+use objc2_app_kit::{NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName};
+use objc2_foundation::{ns_string, NSMutableAttributedString, NSRange};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
@@ -14,7 +17,6 @@ use tauri::{
 };
 
 const HOSTS_PATH: &str = "/etc/hosts";
-const TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("icons/tray.png");
 
 #[derive(Serialize)]
 struct HostsState {
@@ -85,25 +87,47 @@ fn update_tray(
             None::<&str>,
         )?)?;
         tray.set_menu(Some(menu))?;
-        tray.set_icon(Some(tray_icon(&TRAY_ICON, active > 0)))?;
-        tray.set_title(None::<&str>)?;
+        tray.with_inner_tray_icon(move |inner| {
+            let mtm =
+                MainThreadMarker::new().expect("Tauri runs tray callbacks on the main thread");
+            let button = inner
+                .ns_status_item()
+                .and_then(|item| item.button(mtm))
+                .expect("macOS tray button is available");
+            button.setAttributedTitle(&tray_label(active > 0));
+        })?;
         tray.set_tooltip(Some(format!("Hostdeck — {status}")))?;
         Ok(())
     };
     update().map_err(|error| format!("Could not update menu bar: {error}"))
 }
 
-fn tray_icon(icon: &tauri::image::Image<'_>, active: bool) -> tauri::image::Image<'static> {
-    let mut rgba = icon.rgba().to_vec();
-    if !active {
-        for pixel in rgba.chunks_exact_mut(4) {
-            let gray =
-                (u16::from(pixel[0]) * 77 + u16::from(pixel[1]) * 150 + u16::from(pixel[2]) * 29)
-                    / 256;
-            pixel[..3].fill(gray as u8);
+fn tray_label(active: bool) -> Retained<NSMutableAttributedString> {
+    let title = NSMutableAttributedString::from_nsstring(ns_string!("~ $"));
+    let font = NSFont::fontWithName_size(ns_string!("Menlo-Bold"), 18.0)
+        .unwrap_or_else(|| NSFont::boldSystemFontOfSize(18.0));
+    unsafe {
+        title.addAttribute_value_range(NSFontAttributeName, &font, NSRange::new(0, 3));
+        title.addAttribute_value_range(
+            NSForegroundColorAttributeName,
+            &NSColor::labelColor(),
+            NSRange::new(0, 3),
+        );
+        if active {
+            let green = NSColor::colorWithSRGBRed_green_blue_alpha(
+                63.0 / 255.0,
+                224.0 / 255.0,
+                123.0 / 255.0,
+                1.0,
+            );
+            title.addAttribute_value_range(
+                NSForegroundColorAttributeName,
+                &green,
+                NSRange::new(2, 1),
+            );
         }
     }
-    tauri::image::Image::new_owned(rgba, icon.width(), icon.height())
+    title
 }
 
 #[tauri::command]
@@ -190,7 +214,7 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             TrayIconBuilder::with_id("hostdeck")
-                .icon(tray_icon(&TRAY_ICON, false))
+                .title("~ $")
                 .tooltip("Hostdeck")
                 .menu(&Menu::new(app)?)
                 .on_menu_event(|app, event| {
@@ -355,19 +379,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_icon_is_colored_only_when_active_and_preserves_transparency() {
-        let pixels = vec![60, 200, 120, 255, 10, 20, 30, 64];
-        let icon = tauri::image::Image::new_owned(pixels.clone(), 2, 1);
-        assert_eq!(tray_icon(&icon, true).rgba(), pixels);
-
-        let inactive = tray_icon(&icon, false);
-        assert_eq!((inactive.width(), inactive.height()), (2, 1));
-        for (gray, original) in inactive.rgba().chunks_exact(4).zip(pixels.chunks_exact(4)) {
-            assert_eq!(gray[0], gray[1]);
-            assert_eq!(gray[1], gray[2]);
-            assert_eq!(gray[3], original[3]);
+    fn tilde_keeps_native_tint_and_only_an_active_dollar_turns_green() {
+        let active = tray_label(true);
+        let inactive = tray_label(false);
+        assert_eq!(active.string().to_string(), "~ $");
+        for title in [&active, &inactive] {
+            let foreground = unsafe {
+                title.attribute_atIndex_effectiveRange(
+                    NSForegroundColorAttributeName,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                foreground.downcast_ref::<NSColor>().unwrap(),
+                NSColor::labelColor().as_ref()
+            );
         }
-        assert_eq!(icon.rgba(), pixels);
+        let foreground = unsafe {
+            inactive.attribute_atIndex_effectiveRange(
+                NSForegroundColorAttributeName,
+                2,
+                std::ptr::null_mut(),
+            )
+        }
+        .unwrap();
+        assert_eq!(
+            foreground.downcast_ref::<NSColor>().unwrap(),
+            NSColor::labelColor().as_ref()
+        );
+        let green = unsafe {
+            active.attribute_atIndex_effectiveRange(
+                NSForegroundColorAttributeName,
+                2,
+                std::ptr::null_mut(),
+            )
+        }
+        .unwrap();
+        let green = green.downcast_ref::<NSColor>().unwrap();
+        assert!((green.greenComponent() - 224.0 / 255.0).abs() < 0.0001);
+        assert!((green.redComponent() - 63.0 / 255.0).abs() < 0.0001);
+        assert!((green.blueComponent() - 123.0 / 255.0).abs() < 0.0001);
     }
 
     #[test]

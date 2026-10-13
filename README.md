@@ -11,7 +11,7 @@ It is built with Tauri and intentionally focuses on one local hosts file: `/etc/
 - All / Active / Inactive filters
 - Individual row toggles
 - Star favorite entries for quick toggles from the macOS menu bar
-- Menu bar icon is colored when any favorite is active and monochrome otherwise
+- Menu bar prompt uses native tint, with a green `$` when any favorite is active
 - Search by IP, domain, or comment
 - Adds, edits, disables, and deletes host entries
 - Writes a managed hosts block while preserving unmanaged content
