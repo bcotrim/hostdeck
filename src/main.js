@@ -25,6 +25,7 @@ document.documentElement.classList.toggle("is-native-shell", Boolean(invokeNativ
 const root = document.querySelector("#app");
 let state = loadState();
 let toast = null;
+let helperStatus = "checking";
 let trayReady = false;
 let trayUpdate = Promise.resolve();
 let lastTrayPayload = "";
@@ -34,6 +35,7 @@ root.addEventListener("input", handleInput);
 root.addEventListener("change", handleChange);
 document.addEventListener("keydown", handleKeydown, true);
 window.addEventListener("beforeunload", handleBeforeUnload);
+window.addEventListener("focus", () => { if (invokeNative && !state.loading) refreshHelperStatus(); });
 
 render();
 initialize();
@@ -43,6 +45,8 @@ async function initialize() {
     try {
       await window.__TAURI__.event.listen("tray-toggle", (event) => toggleFromTray(event.payload));
       await window.__TAURI__.event.listen("tray-quit", quitFromTray);
+      await window.__TAURI__.event.listen("helper-setup", configureHelper);
+      await refreshHelperStatus();
       trayReady = true;
       syncTray();
     } catch (error) {
@@ -54,6 +58,42 @@ async function initialize() {
   } else {
     await loadHostsFromDisk();
   }
+}
+
+async function refreshHelperStatus() {
+  try {
+    helperStatus = await invokeNative("helper_status");
+    lastTrayPayload = "";
+    syncTray();
+    render();
+  } catch (error) {
+    helperStatus = "unavailable";
+    showToast(String(error), "warn");
+  }
+}
+
+async function configureHelper() {
+  if (state.loading) return;
+  state.loading = true;
+  saveState();
+  render();
+  try {
+    helperStatus = await invokeNative("enable_helper");
+    showToast(helperStatus === "enabled" ? "Helper enabled. Toggles are ready." : "Approve Hostdeck in System Settings → General → Login Items.", helperStatus === "enabled" ? "ok" : "warn");
+  } catch (error) {
+    showToast(String(error), "warn");
+  } finally {
+    state.loading = false;
+    lastTrayPayload = "";
+    saveState();
+    render();
+  }
+}
+
+function helperReady() {
+  if (!invokeNative || helperStatus === "enabled") return true;
+  showToast("Enable the helper below and approve Hostdeck in System Settings to apply changes.", "warn");
+  return false;
 }
 
 function syncTray() {
@@ -81,6 +121,11 @@ async function toggleFromTray(entryId) {
   lastTrayPayload = "";
   if (state.dirty || state.loading) {
     syncTray();
+    return;
+  }
+  if (!helperReady()) {
+    syncTray();
+    await invokeNative("open_window");
     return;
   }
   const host = findEntry(entryId)?.host;
@@ -195,6 +240,7 @@ function render(options = {}) {
             <span>${activeCount}/${state.entries.length} active</span>
             <span>·</span>
             <button data-action="backup-now" aria-label="Back up /etc/hosts">Backup</button>
+            ${invokeNative ? `<span>·</span><button data-action="helper-setup" title="Approve once to apply changes without a password. Re-enable after an app update.">${helperStatus === "enabled" ? "Re-enable helper" : helperStatus === "requires_approval" ? "Approve helper" : "Enable helper"}</button>` : ""}
             <span>·</span>
             <span>${state.lastAppliedAt ? formatRelative(state.lastAppliedAt) : "just now"}</span>
           </div>
@@ -266,6 +312,10 @@ function handleClick(event) {
   if (!button) return;
 
   const action = button.dataset.action;
+  if (action === "helper-setup") {
+    configureHelper();
+    return;
+  }
   if (state.loading && action !== "set-filter" && action !== "focus-issue") return;
   if (action === "favorite-entry") {
     const entry = findEntry(button.dataset.id);
@@ -418,7 +468,7 @@ function handleChange(event) {
 }
 
 async function applyEntries(options = {}) {
-  if (state.loading) return false;
+  if (state.loading || !helperReady()) return false;
   const profile = environmentProfile();
   const issues = validateProfiles([profile]);
   if (issues.length) {
@@ -652,6 +702,7 @@ function reloadHostsFromDisk() {
 }
 
 async function flushDns() {
+  if (state.loading || !helperReady()) return;
   if (!invokeNative) {
     state.lastAppliedAt = new Date().toISOString();
     saveState();
@@ -661,6 +712,9 @@ async function flushDns() {
     return;
   }
 
+  state.loading = true;
+  saveState();
+  render();
   try {
     await invokeNative("flush_dns");
     state.lastAppliedAt = new Date().toISOString();
@@ -669,10 +723,15 @@ async function flushDns() {
     render();
   } catch (error) {
     showToast(String(error), "warn");
+  } finally {
+    state.loading = false;
+    saveState();
+    render();
   }
 }
 
 async function backupHosts() {
+  if (state.loading || !helperReady()) return;
   if (!invokeNative) {
     state.backupCount += 1;
     saveState();
@@ -681,6 +740,9 @@ async function backupHosts() {
     return;
   }
 
+  state.loading = true;
+  saveState();
+  render();
   try {
     const result = await invokeNative("backup_hosts");
     state.backupCount += 1;
@@ -689,6 +751,10 @@ async function backupHosts() {
     render();
   } catch (error) {
     showToast(String(error), "warn");
+  } finally {
+    state.loading = false;
+    saveState();
+    render();
   }
 }
 

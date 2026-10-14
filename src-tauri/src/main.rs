@@ -1,14 +1,12 @@
+mod privileged;
+
 use block2::RcBlock;
 use objc2::{rc::Retained, runtime::Bool, MainThreadMarker};
 use objc2_app_kit::{NSBezierPath, NSColor, NSImage, NSLineCapStyle};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
-    process::Command,
+    fs,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{
@@ -24,11 +22,6 @@ struct HostsState {
     contents: String,
     path: String,
     modified_at: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct PrivilegedResult {
-    backup_path: String,
 }
 
 #[derive(Deserialize)]
@@ -52,8 +45,11 @@ fn update_tray(
         };
         let menu = Menu::new(&app)?;
         let active = entries.iter().filter(|entry| entry.enabled).count();
+        let helper_ready = privileged::status().is_ok_and(|status| status == "enabled");
         let status = if busy {
             "Working…".to_string()
+        } else if !helper_ready {
+            "Enable the helper in Hostdeck to toggle".to_string()
         } else if dirty {
             "Apply or discard edits in Hostdeck to toggle".to_string()
         } else if entries.is_empty() {
@@ -67,12 +63,21 @@ fn update_tray(
                 &app,
                 format!("favorite:{}", entry.id),
                 format!("{} · {}", entry.host, entry.ip),
-                !dirty && !busy,
+                helper_ready && !dirty && !busy,
                 entry.enabled,
                 None::<&str>,
             )?)?;
         }
         menu.append(&PredefinedMenuItem::separator(&app)?)?;
+        if !helper_ready {
+            menu.append(&MenuItem::with_id(
+                &app,
+                "helper-setup",
+                "Set up helper…",
+                !busy,
+                None::<&str>,
+            )?)?;
+        }
         menu.append(&MenuItem::with_id(
             &app,
             "open",
@@ -139,6 +144,8 @@ fn tray_image(active: bool) -> Retained<NSImage> {
 #[tauri::command]
 fn open_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        app.set_activation_policy(tauri::ActivationPolicy::Regular)
+            .map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
@@ -170,53 +177,35 @@ fn read_hosts() -> Result<HostsState, String> {
 #[tauri::command(async)]
 fn write_hosts(
     contents: String,
-    expected_contents: Option<String>,
-) -> Result<PrivilegedResult, String> {
-    if contents.trim().is_empty() {
-        return Err("Refusing to write an empty hosts file.".to_string());
-    }
-
-    ensure_hosts_unchanged(expected_contents.as_deref())?;
-
-    let timestamp = timestamp_token()?;
-    let temp_path = write_temp_hosts(&contents, &timestamp)?;
-    let backup_path = format!("{HOSTS_PATH}.hostdeck.{timestamp}.bak");
-    let backup_exists_message = format!("Backup already exists: {backup_path}");
-    let script = format!(
-        "set -e; if test -e {backup}; then echo {backup_exists_message} >&2; exit 1; fi; cp {hosts} {backup}; cp {temp} {hosts}; chown root:wheel {hosts}; chmod 644 {hosts}; dscacheutil -flushcache; killall -HUP mDNSResponder",
-        hosts = shell_quote(HOSTS_PATH),
-        backup = shell_quote(&backup_path),
-        backup_exists_message = shell_quote(&backup_exists_message),
-        temp = shell_quote(&temp_path.to_string_lossy()),
-    );
-
-    let result = run_privileged_shell(&script);
-    let _ = fs::remove_file(&temp_path);
-    result.map(|_| PrivilegedResult { backup_path })
+    expected_contents: String,
+) -> Result<privileged::Response, String> {
+    privileged::write(contents, expected_contents)
 }
 
-#[tauri::command]
-fn backup_hosts() -> Result<PrivilegedResult, String> {
-    let timestamp = timestamp_token()?;
-    let backup_path = format!("{HOSTS_PATH}.hostdeck.{timestamp}.bak");
-    let backup_exists_message = format!("Backup already exists: {backup_path}");
-    let script = format!(
-        "set -e; if test -e {backup}; then echo {backup_exists_message} >&2; exit 1; fi; cp {hosts} {backup}; chown root:wheel {backup}; chmod 644 {backup}",
-        hosts = shell_quote(HOSTS_PATH),
-        backup = shell_quote(&backup_path),
-        backup_exists_message = shell_quote(&backup_exists_message),
-    );
-
-    run_privileged_shell(&script).map(|_| PrivilegedResult { backup_path })
+#[tauri::command(async)]
+fn backup_hosts() -> Result<privileged::Response, String> {
+    privileged::backup()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn flush_dns() -> Result<(), String> {
-    run_shell("dscacheutil", &["-flushcache"])?;
-    run_shell("killall", &["-HUP", "mDNSResponder"])
+    privileged::flush()
+}
+
+#[tauri::command]
+fn helper_status() -> Result<String, String> {
+    privileged::status()
+}
+
+#[tauri::command(async)]
+fn enable_helper() -> Result<String, String> {
+    privileged::enable()
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--privileged-helper") {
+        privileged::run();
+    }
     tauri::Builder::default()
         .setup(|app| {
             TrayIconBuilder::with_id("hostdeck")
@@ -225,6 +214,10 @@ fn main() {
                 .on_menu_event(|app, event| {
                     let result = match event.id.as_ref() {
                         "open" => open_window(app.clone()),
+                        "helper-setup" => open_window(app.clone()).and_then(|_| {
+                            app.emit("helper-setup", ())
+                                .map_err(|error| error.to_string())
+                        }),
                         "quit" => app.emit("tray-quit", ()).map_err(|error| error.to_string()),
                         id => {
                             if let Some(id) = id.strip_prefix("favorite:") {
@@ -247,10 +240,18 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.hide().is_ok() {
                     api.prevent_close();
+                    if let Err(error) = window
+                        .app_handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory)
+                    {
+                        eprintln!("Could not hide Hostdeck from the Dock: {error}");
+                    }
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            helper_status,
+            enable_helper,
             backup_hosts,
             flush_dns,
             read_hosts,
@@ -273,103 +274,6 @@ fn main() {
             }
             _ => {}
         });
-}
-
-fn write_temp_hosts(contents: &str, timestamp: &str) -> Result<PathBuf, String> {
-    for attempt in 0..32 {
-        let path = std::env::temp_dir().join(format!(
-            "hostdeck-hosts-{}-{timestamp}-{attempt}.tmp",
-            std::process::id()
-        ));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path);
-
-        let mut file = match file {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("Could not write temporary hosts file: {error}")),
-        };
-
-        if let Err(error) = file.write_all(contents.as_bytes()) {
-            let _ = fs::remove_file(&path);
-            return Err(format!("Could not write temporary hosts file: {error}"));
-        }
-
-        return Ok(path);
-    }
-
-    Err("Could not create a unique temporary hosts file.".to_string())
-}
-
-fn ensure_hosts_unchanged(expected_contents: Option<&str>) -> Result<(), String> {
-    ensure_file_contents_unchanged(HOSTS_PATH, expected_contents)
-}
-
-fn ensure_file_contents_unchanged(
-    path: &str,
-    expected_contents: Option<&str>,
-) -> Result<(), String> {
-    let Some(expected) = expected_contents else {
-        return Ok(());
-    };
-
-    let current = fs::read_to_string(path)
-        .map_err(|error| format!("Could not read {path} before writing: {error}"))?;
-
-    if current == expected {
-        return Ok(());
-    }
-
-    Err(format!(
-        "Refusing to overwrite {path} because it changed since it was loaded. Reload /etc/hosts and try again."
-    ))
-}
-
-fn run_privileged_shell(script: &str) -> Result<(), String> {
-    let expression = format!(
-        "do shell script {} with administrator privileges",
-        applescript_string(script)
-    );
-    run_shell("osascript", &["-e", &expression])
-}
-
-fn run_shell(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("Could not run {program}: {error}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let details = if stderr.is_empty() { stdout } else { stderr };
-
-    Err(if details.is_empty() {
-        format!("{program} exited with {}", output.status)
-    } else {
-        details
-    })
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn applescript_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-fn timestamp_token() -> Result<String, String> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos().to_string())
-        .map_err(|error| format!("System clock error: {error}"))
 }
 
 fn system_time_millis(value: SystemTime) -> Option<u64> {
@@ -421,62 +325,5 @@ mod tests {
             assert!(color.alphaComponent() > 0.9);
             assert_eq!(bitmap.colorAtX_y(0, 0).unwrap().alphaComponent(), 0.0);
         }
-    }
-
-    #[test]
-    fn quotes_shell_values() {
-        assert_eq!(shell_quote("/tmp/host deck"), "'/tmp/host deck'");
-        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-    }
-
-    #[test]
-    fn quotes_applescript_values() {
-        assert_eq!(applescript_string("say \"hi\""), "\"say \\\"hi\\\"\"");
-        assert_eq!(applescript_string("a\\b"), "\"a\\\\b\"");
-    }
-
-    #[test]
-    fn creates_unique_temp_hosts_file() {
-        let timestamp = timestamp_token().unwrap();
-        let first = write_temp_hosts("127.0.0.1 localhost\n", &timestamp).unwrap();
-        let second = write_temp_hosts("127.0.0.1 localhost\n", &timestamp).unwrap();
-
-        assert_ne!(first, second);
-        assert_eq!(fs::read_to_string(&first).unwrap(), "127.0.0.1 localhost\n");
-
-        let _ = fs::remove_file(first);
-        let _ = fs::remove_file(second);
-    }
-
-    #[test]
-    fn accepts_unchanged_expected_hosts_contents() {
-        let path = test_temp_path("unchanged");
-        fs::write(&path, "127.0.0.1 localhost\n").unwrap();
-
-        let result =
-            ensure_file_contents_unchanged(path.to_str().unwrap(), Some("127.0.0.1 localhost\n"));
-
-        let _ = fs::remove_file(path);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn rejects_changed_expected_hosts_contents() {
-        let path = test_temp_path("changed");
-        fs::write(&path, "127.0.0.1 localhost\n").unwrap();
-
-        let result =
-            ensure_file_contents_unchanged(path.to_str().unwrap(), Some("127.0.0.1 stale.local\n"));
-
-        let _ = fs::remove_file(path);
-        assert!(result.is_err());
-    }
-
-    fn test_temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "hostdeck-test-{name}-{}-{}",
-            std::process::id(),
-            timestamp_token().unwrap()
-        ))
     }
 }

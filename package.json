@@ -23,8 +23,9 @@
     "build": "node scripts/build-web.js",
     "dev": "python3 -m http.server 5174",
     "tauri": "tauri dev",
-    "tauri:build": "tauri build",
-    "test": "node --test tests/*.test.js"
+    "tauri:build": "node scripts/build-native.js",
+    "test": "node --test tests/*.test.js",
+    "setup-signing": "node scripts/setup-signing.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.3"

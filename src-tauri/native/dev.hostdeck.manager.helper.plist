@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.hostdeck.manager.helper</string>
+  <key>BundleProgram</key><string>Contents/MacOS/hostdeck</string>
+  <key>ProgramArguments</key>
+  <array><string>hostdeck</string><string>--privileged-helper</string></array>
+  <key>MachServices</key>
+  <dict><key>dev.hostdeck.manager.helper</key><true/></dict>
+  <key>AssociatedBundleIdentifiers</key>
+  <array><string>dev.hostdeck.manager</string></array>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

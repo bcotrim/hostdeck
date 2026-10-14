@@ -13,6 +13,7 @@ const initialHosts = hosts.applyManagedBlock("127.0.0.1 localhost\n", {
 
 async function app(options = {}) {
   let disk = initialHosts;
+  let helperStatus = options.helperStatus ?? "enabled";
   const calls = [];
   const listeners = new Map();
   const storage = new Map([["hostdeck-native-v1", JSON.stringify({
@@ -35,12 +36,18 @@ async function app(options = {}) {
       removeItem(key) { storage.delete(key); }
     },
     window: {
-      addEventListener() {}, clearTimeout() {}, setTimeout() {},
+      addEventListener(name, callback) { listeners.set(name, callback); }, clearTimeout() {}, setTimeout() {},
       confirm() { return options.confirm !== false; },
       __TAURI__: {
         event: { async listen(name, callback) { listeners.set(name, callback); } },
         core: { async invoke(command, args) {
           calls.push({ command, args });
+          if (command === "helper_status") return helperStatus;
+          if (command === "enable_helper") {
+            if (options.enableError) throw new Error(options.enableError);
+            helperStatus = options.enableStatus ?? "requires_approval";
+            return helperStatus;
+          }
           if (command === "read_hosts") return { contents: disk, path: "/etc/hosts", modified_at: 0 };
           if (command === "write_hosts") {
             if (options.writeError) throw new Error(options.writeError);
@@ -70,6 +77,9 @@ async function app(options = {}) {
     calls, storage,
     toggle: () => listeners.get("tray-toggle")({ payload: context.app.state.entries[0].id }),
     quit: () => listeners.get("tray-quit")(),
+    setup: () => listeners.get("helper-setup")(),
+    focus: () => listeners.get("focus")(),
+    approve: () => { helperStatus = "enabled"; },
     favorite() {
       context.app.handleClick({ target: { closest() {
         return { dataset: { action: "favorite-entry", id: context.app.state.entries[0].id } };
@@ -107,8 +117,8 @@ test("menu toggle applies one host, retains its star, and updates the checkmark"
   assert.equal(menu.busy, false);
 });
 
-test("cancelled authorization restores the applied toggle and favorite", async () => {
-  const instance = await app({ writeError: "User canceled." });
+test("helper errors restore the applied toggle and favorite", async () => {
+  const instance = await app({ writeError: "Helper unavailable." });
   await instance.toggle();
   await instance.settle();
   assert.equal(instance.disk, initialHosts);
@@ -181,4 +191,36 @@ test("an empty restored draft stays empty", async () => {
   const instance = await app({ stored: { entries: [], dirty: true } });
   assert.equal(instance.state.entries.length, 0);
   assert.equal(instance.state.dirty, true);
+});
+
+
+test("pending helper approval keeps drafts and blocks writes", async () => {
+  const instance = await app({ helperStatus: "not_registered", stored: { dirty: true } });
+  await instance.setup();
+  assert.equal(instance.state.dirty, true);
+  assert.match(instance.html, /Approve helper/);
+  assert.equal(instance.calls.filter((call) => call.command === "enable_helper").length, 1);
+  instance.approve();
+  await instance.focus();
+  await instance.settle();
+  assert.match(instance.html, /Re-enable helper/);
+  assert.equal(instance.state.dirty, true);
+  assert.equal(instance.calls.some((call) => call.command === "write_hosts"), false);
+});
+
+test("unapproved helpers cannot apply a menu toggle", async () => {
+  const instance = await app({ helperStatus: "requires_approval" });
+  await instance.toggle();
+  assert.equal(instance.state.entries[0].enabled, true);
+  assert.equal(instance.calls.some((call) => call.command === "write_hosts"), false);
+  assert.equal(instance.calls.some((call) => call.command === "open_window"), true);
+});
+
+test("registration failures leave edits intact and release the busy state", async () => {
+  const instance = await app({ helperStatus: "not_registered", enableError: "Registration failed", stored: { dirty: true } });
+  await instance.setup();
+  assert.equal(instance.state.dirty, true);
+  assert.equal(instance.state.loading, false);
+  assert.equal(instance.disk, initialHosts);
+  assert.match(instance.html, /Registration failed/);
 });
