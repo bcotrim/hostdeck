@@ -1,6 +1,7 @@
-use objc2::{rc::Retained, MainThreadMarker};
-use objc2_app_kit::{NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName};
-use objc2_foundation::{ns_string, NSMutableAttributedString, NSRange};
+use block2::RcBlock;
+use objc2::{rc::Retained, runtime::Bool, MainThreadMarker};
+use objc2_app_kit::{NSBezierPath, NSColor, NSImage, NSLineCapStyle};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
@@ -94,7 +95,7 @@ fn update_tray(
                 .ns_status_item()
                 .and_then(|item| item.button(mtm))
                 .expect("macOS tray button is available");
-            button.setAttributedTitle(&tray_label(active > 0));
+            button.setImage(Some(&tray_image(active > 0)));
         })?;
         tray.set_tooltip(Some(format!("Hostdeck — {status}")))?;
         Ok(())
@@ -102,32 +103,37 @@ fn update_tray(
     update().map_err(|error| format!("Could not update menu bar: {error}"))
 }
 
-fn tray_label(active: bool) -> Retained<NSMutableAttributedString> {
-    let title = NSMutableAttributedString::from_nsstring(ns_string!("~ $"));
-    let font = NSFont::fontWithName_size(ns_string!("Menlo-Bold"), 18.0)
-        .unwrap_or_else(|| NSFont::boldSystemFontOfSize(18.0));
-    unsafe {
-        title.addAttribute_value_range(NSFontAttributeName, &font, NSRange::new(0, 3));
-        title.addAttribute_value_range(
-            NSForegroundColorAttributeName,
-            &NSColor::labelColor(),
-            NSRange::new(0, 3),
-        );
-        if active {
-            let green = NSColor::colorWithSRGBRed_green_blue_alpha(
+fn tray_image(active: bool) -> Retained<NSImage> {
+    let drawing = RcBlock::new(move |_: NSRect| {
+        let color = if active {
+            NSColor::colorWithSRGBRed_green_blue_alpha(
                 63.0 / 255.0,
                 224.0 / 255.0,
                 123.0 / 255.0,
                 1.0,
-            );
-            title.addAttribute_value_range(
-                NSForegroundColorAttributeName,
-                &green,
-                NSRange::new(2, 1),
-            );
+            )
+        } else {
+            NSColor::blackColor()
+        };
+        color.setStroke();
+        let path = NSBezierPath::bezierPath();
+        path.setLineWidth(2.5);
+        path.setLineCapStyle(NSLineCapStyle::Round);
+        for (start, end) in [
+            ((3.0, 8.0), (8.5, 13.5)),
+            ((5.0, 5.0), (13.0, 13.0)),
+            ((9.5, 4.5), (15.0, 10.0)),
+        ] {
+            path.moveToPoint(NSPoint::new(start.0, start.1));
+            path.lineToPoint(NSPoint::new(end.0, end.1));
         }
-    }
-    title
+        path.stroke();
+        Bool::YES
+    });
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(18.0, 18.0), false, &drawing);
+    image.setTemplate(!active);
+    image
 }
 
 #[tauri::command]
@@ -214,7 +220,6 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             TrayIconBuilder::with_id("hostdeck")
-                .title("~ $")
                 .tooltip("Hostdeck")
                 .menu(&Menu::new(app)?)
                 .on_menu_event(|app, event| {
@@ -379,48 +384,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tilde_keeps_native_tint_and_only_an_active_dollar_turns_green() {
-        let active = tray_label(true);
-        let inactive = tray_label(false);
-        assert_eq!(active.string().to_string(), "~ $");
-        for title in [&active, &inactive] {
-            let foreground = unsafe {
-                title.attribute_atIndex_effectiveRange(
-                    NSForegroundColorAttributeName,
-                    0,
-                    std::ptr::null_mut(),
-                )
+    fn tray_logo_is_native_monochrome_when_inactive_and_green_when_active() {
+        use objc2_app_kit::{NSBitmapImageRep, NSColorSpace};
+
+        for active in [false, true] {
+            let image = tray_image(active);
+            assert_eq!(image.size(), NSSize::new(18.0, 18.0));
+            assert_eq!(image.isTemplate(), !active);
+            let bitmap =
+                NSBitmapImageRep::imageRepWithData(&image.TIFFRepresentation().unwrap()).unwrap();
+            let color = bitmap
+                .colorAtX_y(8, 9)
+                .unwrap()
+                .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+                .unwrap();
+            let expected = if active {
+                [63.0, 224.0, 123.0]
+            } else {
+                [0.0; 3]
+            };
+            for (actual, expected) in [
+                color.redComponent(),
+                color.greenComponent(),
+                color.blueComponent(),
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                // AppKit color-manages rasterized images.
+                assert!(
+                    (actual - expected / 255.0).abs() < 0.1,
+                    "active={active}: expected {}, got {actual}",
+                    expected / 255.0
+                );
             }
-            .unwrap();
-            assert_eq!(
-                foreground.downcast_ref::<NSColor>().unwrap(),
-                NSColor::labelColor().as_ref()
-            );
+            assert!(color.alphaComponent() > 0.9);
+            assert_eq!(bitmap.colorAtX_y(0, 0).unwrap().alphaComponent(), 0.0);
         }
-        let foreground = unsafe {
-            inactive.attribute_atIndex_effectiveRange(
-                NSForegroundColorAttributeName,
-                2,
-                std::ptr::null_mut(),
-            )
-        }
-        .unwrap();
-        assert_eq!(
-            foreground.downcast_ref::<NSColor>().unwrap(),
-            NSColor::labelColor().as_ref()
-        );
-        let green = unsafe {
-            active.attribute_atIndex_effectiveRange(
-                NSForegroundColorAttributeName,
-                2,
-                std::ptr::null_mut(),
-            )
-        }
-        .unwrap();
-        let green = green.downcast_ref::<NSColor>().unwrap();
-        assert!((green.greenComponent() - 224.0 / 255.0).abs() < 0.0001);
-        assert!((green.redComponent() - 63.0 / 255.0).abs() < 0.0001);
-        assert!((green.blueComponent() - 123.0 / 255.0).abs() < 0.0001);
     }
 
     #[test]
